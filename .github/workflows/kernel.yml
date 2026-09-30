@@ -1,0 +1,96 @@
+name: Build fogos kernel (ReSukiSU + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          ref: los23.2-ksu-susfs
+          fetch-depth: 1
+          path: kernel
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev make gcc git zip unzip \
+            libncurses-dev python3 python-is-python3 cpio device-tree-compiler ccache rsync
+
+      - name: Clone toolchain (clang-standalone)
+        run: |
+          git clone --depth=1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git "$HOME/clang"
+          echo "clang at: $HOME/clang"; ls "$HOME/clang/bin" | head || true
+          "$HOME/clang/bin/clang" --version || true
+
+      - name: Integrate ReSukiSU (manual hook + susfs)
+        working-directory: kernel
+        run: |
+          set -e
+          # ReSukiSU setup (susfs variant). Fallback a SukiSU-Ultra si cambia la URL.
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s susfs \
+          || curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+          echo "--- estado tras setup KSU ---"; ls -la | grep -iE 'kernelsu|resukisu|sukisu' || true
+
+      - name: Apply SUSFS kernel patch (5.4)
+        working-directory: kernel
+        run: |
+          git clone --depth=1 -b kernel-5.4 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          cp -v ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          cp -v ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          PATCH=$(ls ../susfs4ksu/kernel_patches/ | grep -E '50_add_susfs_in_kernel-5.4.patch' | head -1)
+          echo "patch = $PATCH"
+          patch -p1 --fuzz=3 < "../susfs4ksu/kernel_patches/$PATCH" || echo "WARN: susfs patch con rechazos (iterar)"
+
+      - name: Build kernel
+        working-directory: kernel
+        env:
+          KBUILD_BUILD_USER: ci
+          KBUILD_BUILD_HOST: gha
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          mkdir -p out
+          # fragmento KSU + SUSFS
+          F=out/ksu_susfs.config
+          : > "$F"
+          echo 'CONFIG_KSU=y'                              >> "$F"
+          echo 'CONFIG_KSU_MANUAL_HOOK=y'                  >> "$F"
+          echo 'CONFIG_KSU_SUSFS=y'                        >> "$F"
+          echo 'CONFIG_KSU_SUSFS_SUS_PATH=y'              >> "$F"
+          echo 'CONFIG_KSU_SUSFS_SUS_MOUNT=y'             >> "$F"
+          echo 'CONFIG_KSU_SUSFS_TRY_UMOUNT=y'            >> "$F"
+          echo 'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y' >> "$F"
+          echo 'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y' >> "$F"
+          echo 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y'           >> "$F"
+          echo 'CONFIG_KSU_SUSFS_ENABLE_LOG=y'            >> "$F"
+          echo 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' >> "$F"
+          echo 'CONFIG_KSU_SUSFS_SPOOF_PROC_CMDLINE=y'    >> "$F"
+          echo 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y'         >> "$F"
+          # defconfig base oficial + fragmento LOS + KSU/SUSFS
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 vendor/holi-qgki_defconfig
+          scripts/kconfig/merge_config.sh -m -O out out/.config \
+            arch/arm64/configs/vendor/ext_config/lineage_moto-holi.config \
+            "$F" || echo "WARN: merge_config con avisos"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          echo "=== KSU/SUSFS en .config ==="; grep -E 'CONFIG_KSU' out/.config || true
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)"
+          ls -la out/arch/arm64/boot/ || true
+
+      - name: Package AnyKernel3
+        working-directory: kernel
+        run: |
+          git clone --depth=1 -b master https://github.com/heybyben/AnyKernel3-hey.git AnyKernel3
+          cp -v out/arch/arm64/boot/Image AnyKernel3/
+          cp -v out/arch/arm64/boot/dtb.img  AnyKernel3/dtb      2>/dev/null || true
+          cp -v out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img 2>/dev/null || true
+          cd AnyKernel3 && zip -r9 ../fogos-ksu-susfs.zip . -x '*.git*' -x '*.github*'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fogos-ksu-susfs-anykernel3
+          path: kernel/fogos-ksu-susfs.zip
+          if-no-files-found: warn
