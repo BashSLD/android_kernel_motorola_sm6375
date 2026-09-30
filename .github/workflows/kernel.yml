@@ -45,6 +45,17 @@ jobs:
           echo "patch = $PATCH"
           patch -p1 --fuzz=3 < "../susfs4ksu/kernel_patches/$PATCH" || echo "WARN: susfs patch con rechazos (iterar)"
 
+      - name: Add ReSukiSU inline/manual hook call-sites (source)
+        working-directory: kernel
+        run: |
+          git config user.email ci@local || true
+          git config user.name ci || true
+          curl -LSs "https://github.com/moto-fogos/android_kernel_motorola_sm6375/commit/e013854f13c8.patch" -o /tmp/ksu_hooks.patch
+          git apply --3way /tmp/ksu_hooks.patch \
+            || patch -p1 --fuzz=3 < /tmp/ksu_hooks.patch \
+            || echo "WARN: ksu hooks patch con rechazos (iterar)"
+          echo "--- ksu_handle en fuente ---"; grep -rn "ksu_handle" fs/ kernel/ | head -20 || true
+
       - name: Build kernel
         working-directory: kernel
         env:
@@ -57,7 +68,6 @@ jobs:
           F=out/ksu_susfs.config
           : > "$F"
           echo 'CONFIG_KSU=y'                              >> "$F"
-          echo 'CONFIG_KSU_MANUAL_HOOK=y'                  >> "$F"
           echo 'CONFIG_KSU_SUSFS=y'                        >> "$F"
           echo 'CONFIG_KSU_SUSFS_SUS_PATH=y'              >> "$F"
           echo 'CONFIG_KSU_SUSFS_SUS_MOUNT=y'             >> "$F"
