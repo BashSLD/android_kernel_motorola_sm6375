@@ -1,0 +1,93 @@
+name: Build fogos kernel (ReSukiSU 1ccbf7b + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: resukisu-susfs
+          submodules: recursive
+          fetch-depth: 1
+          path: kernel
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev make gcc git zip unzip \
+            libncurses-dev python3 python-is-python3 cpio device-tree-compiler ccache rsync
+
+      - name: Submodule sanity (ReSukiSU 1ccbf7b)
+        working-directory: kernel
+        run: |
+          git submodule update --init --recursive || true
+          if [ ! -f KernelSU/kernel/Makefile ]; then
+            rm -rf KernelSU; git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+            git -C KernelSU checkout 1ccbf7b6414680ad269049eb5e103afdc7ccc00a
+          fi
+          echo "KSU commit:"; git -C KernelSU rev-parse --short HEAD || true
+
+      - name: Fetch SUSFS (kernel-5.4) and show version
+        working-directory: kernel
+        run: |
+          git clone --depth=1 -b kernel-5.4 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
+          echo "=== SUSFS_VERSION que trae el patch ==="
+          grep -R "SUSFS_VERSION" ../susfs4ksu/kernel_patches/include/ 2>/dev/null | head || true
+          echo "=== version que espera ReSukiSU 1ccbf7b ==="
+          grep -R "SUSFS_VERSION\|susfs.*1\.5\|SUSFS.*version" KernelSU/kernel/ 2>/dev/null | head || true
+
+      - name: Apply SUSFS kernel patch (5.4)
+        working-directory: kernel
+        run: |
+          cp -v ../susfs4ksu/kernel_patches/fs/* fs/ 2>/dev/null || true
+          cp -rv ../susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+          P=$(ls ../susfs4ksu/kernel_patches/ | grep '50_add_susfs_in_kernel-5.4.patch' | head -1)
+          echo "patch=$P"
+          patch -p1 --fuzz=3 < "../susfs4ksu/kernel_patches/$P" || echo "WARN: susfs patch con rechazos"
+          echo "=== .rej (conflictos) ==="; find . -name '*.rej' -exec echo '--- {} ---' \; -exec cat {} \; | head -120 || true
+
+      - name: Enable SUSFS + AUTO hooks in defconfig
+        working-directory: kernel
+        run: |
+          D=arch/arm64/configs/vendor/wakacaw_defconfig
+          test -f "$D" || D=arch/arm64/configs/vendor/holi-qgki_defconfig
+          echo "defconfig=$D"
+          {
+            echo 'CONFIG_KSU=y'
+            echo 'CONFIG_KSU_MANUAL_HOOK=y'
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y'
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y'
+            echo 'CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y'
+            echo 'CONFIG_KSU_SUSFS=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_PATH=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_MOUNT=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_KSTAT=y'
+            echo 'CONFIG_KSU_SUSFS_SUS_MAP=y'
+            echo 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y'
+            echo 'CONFIG_KSU_SUSFS_ENABLE_LOG=y'
+            echo 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y'
+            echo 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y'
+            echo 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y'
+          } >> "$D"
+          echo "--- tail defconfig ---"; tail -20 "$D"
+
+      - name: Build (build.sh)
+        working-directory: kernel
+        run: |
+          chmod +x build.sh || true
+          bash build.sh -c
+
+      - name: Locate artifact
+        working-directory: kernel
+        run: ls -la *.zip 2>/dev/null || echo "no zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fogos-resukisu-susfs-anykernel3
+          path: kernel/*.zip
+          if-no-files-found: warn
